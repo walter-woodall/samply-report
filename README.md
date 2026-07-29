@@ -25,10 +25,8 @@ Accepts plain JSON or gzip-compressed profiles.
 | Key | Action |
 |-----|--------|
 | `j` / `k` / arrows | Move |
-| Enter / Space | Expand / collapse |
-| `←` / `h` | Collapse (or parent) |
-| `→` / `l` | Expand |
-| `e` | Expand all nodes ≥ `--expand-pct` |
+| `e` | Expand current node (immediate children only) |
+| `c` | Collapse current node (or parent if already collapsed) |
 | `/` | Filter by symbol substring |
 | `q` / Esc | Quit |
 

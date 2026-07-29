@@ -24,7 +24,6 @@ pub struct App {
     pub cursor: usize,
     pub filter: String,
     pub filtering: bool,
-    pub expand_threshold_pct: f64,
     pub status: String,
 }
 
@@ -35,7 +34,6 @@ impl App {
         thread_index: usize,
         thread_name: String,
         tree: CallTree,
-        expand_threshold_pct: f64,
     ) -> Self {
         let mut expanded = HashSet::new();
         for (i, root) in tree.roots.iter().enumerate() {
@@ -53,7 +51,6 @@ impl App {
             cursor: 0,
             filter: String::new(),
             filtering: false,
-            expand_threshold_pct,
             status: String::new(),
         }
     }
@@ -73,7 +70,7 @@ impl App {
             .collect()
     }
 
-    fn toggle_expand(&mut self) {
+    fn expand_node(&mut self) {
         let rows = self.visible_rows();
         let Some(row) = rows.get(self.cursor) else {
             return;
@@ -81,25 +78,22 @@ impl App {
         if !row.has_children {
             return;
         }
-        if self.expanded.contains(&row.path) {
-            self.collapse_path(&row.path);
-        } else {
-            // Expand only this node; clear any leftover descendant expansion so
-            // we show immediate children collapsed (one level).
-            self.clear_descendants(&row.path);
-            self.expanded.insert(row.path.clone());
-        }
+        // One level only: show immediate children, all collapsed.
+        self.clear_descendants(&row.path);
+        self.expanded.insert(row.path.clone());
     }
 
-    fn collapse(&mut self) {
+    fn collapse_node(&mut self) {
         let rows = self.visible_rows();
         let Some(row) = rows.get(self.cursor) else {
             return;
         };
         if row.expanded {
+            // Fold children away; stay on this node.
             self.collapse_path(&row.path);
             return;
         }
+        // Already collapsed: collapse the parent and move cursor up to it.
         if row.path.len() > 1 {
             let parent: NodePath = row.path[..row.path.len() - 1].to_vec();
             self.collapse_path(&parent);
@@ -119,31 +113,6 @@ impl App {
     fn clear_descendants(&mut self, path: &NodePath) {
         self.expanded
             .retain(|p| !(p.starts_with(path) && p.len() > path.len()));
-    }
-
-    fn expand_by_threshold(&mut self) {
-        // One level only: expand currently visible collapsed nodes that meet
-        // the threshold, without recursively opening their descendants.
-        let threshold = self.expand_threshold_pct;
-        let total = self.tree.total_samples;
-        let to_expand: Vec<NodePath> = self
-            .visible_rows()
-            .into_iter()
-            .filter(|row| {
-                row.has_children
-                    && !row.expanded
-                    && pct(row.total, total) >= threshold
-            })
-            .map(|row| row.path)
-            .collect();
-        for path in &to_expand {
-            self.clear_descendants(path);
-            self.expanded.insert(path.clone());
-        }
-        self.status = format!(
-            "expanded {} node(s) >= {threshold:.2}% (one level)",
-            to_expand.len()
-        );
     }
 }
 
@@ -241,13 +210,13 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                 format!("Filter: {}_  (Enter apply, Esc cancel)", app.filter)
             } else if !app.filter.is_empty() {
                 format!(
-                    "{} | filter=\"{}\" | e: expand>={}% | / filter | q quit",
-                    app.status, app.filter, app.expand_threshold_pct
+                    "{} | filter=\"{}\" | e expand  c collapse  / filter  q quit",
+                    app.status, app.filter
                 )
             } else {
                 format!(
-                    "{} | j/k move  Enter/Space expand  ← collapse  e expand>={}%  / filter  q quit",
-                    app.status, app.expand_threshold_pct
+                    "{} | j/k move  e expand  c collapse  / filter  q quit",
+                    app.status
                 )
             };
             frame.render_widget(Paragraph::new(status), chunks[2]);
@@ -310,24 +279,13 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                     app.cursor = len - 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => app.toggle_expand(),
-            KeyCode::Left | KeyCode::Char('h') => app.collapse(),
-            KeyCode::Right | KeyCode::Char('l') => {
-                let rows = app.visible_rows();
-                if let Some(row) = rows.get(app.cursor).cloned()
-                    && row.has_children
-                    && !row.expanded
-                {
-                    app.clear_descendants(&row.path);
-                    app.expanded.insert(row.path);
-                }
-            }
-            KeyCode::Char('e') => app.expand_by_threshold(),
+            KeyCode::Char('e') => app.expand_node(),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+            KeyCode::Char('c') => app.collapse_node(),
             KeyCode::Char('/') => {
                 app.filtering = true;
                 app.filter.clear();
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             _ => {}
         }
     }

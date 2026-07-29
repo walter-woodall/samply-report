@@ -91,7 +91,6 @@ async fn main() -> Result<()> {
         thread_index,
         thread_name,
         tree,
-        args.expand_pct,
     );
     run_tui(app)
 }
