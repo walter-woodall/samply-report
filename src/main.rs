@@ -39,7 +39,11 @@ struct Args {
     #[arg(long)]
     no_symbols: bool,
 
-    /// Expand threshold percent for --tree and TUI `e`
+    /// Hide nodes below this percentage of total samples (e.g. 0.1)
+    #[arg(long, default_value_t = 0.0)]
+    threshold: f64,
+
+    /// Auto-expand nodes at/above this percent when using --tree
     #[arg(long, default_value_t = 1.0)]
     expand_pct: f64,
 
@@ -81,7 +85,13 @@ async fn main() -> Result<()> {
     let tree = CallTree::from_thread(thread, &symbols, &profile.libs)?;
 
     if args.tree {
-        print_tree(&tree, &profile.libs, args.expand_pct, args.depth);
+        print_tree(
+            &tree,
+            &profile.libs,
+            args.expand_pct,
+            args.threshold,
+            args.depth,
+        );
         return Ok(());
     }
 
@@ -91,11 +101,18 @@ async fn main() -> Result<()> {
         thread_index,
         thread_name,
         tree,
+        args.threshold,
     );
     run_tui(app)
 }
 
-fn print_tree(tree: &CallTree, libs: &[profile::Library], expand_pct: f64, max_depth: usize) {
+fn print_tree(
+    tree: &CallTree,
+    libs: &[profile::Library],
+    expand_pct: f64,
+    min_pct: f64,
+    max_depth: usize,
+) {
     println!(
         "{:>8}  {:>8}  {:>8}  Symbol",
         "Children", "Self", "Samples"
@@ -107,6 +124,7 @@ fn print_tree(tree: &CallTree, libs: &[profile::Library], expand_pct: f64, max_d
         prefix: &[usize],
         total: u64,
         expand_pct: f64,
+        min_pct: f64,
         max_depth: usize,
         depth: usize,
         expanded: &mut HashSet<NodePath>,
@@ -115,6 +133,9 @@ fn print_tree(tree: &CallTree, libs: &[profile::Library], expand_pct: f64, max_d
             return;
         }
         for (i, node) in children.iter().enumerate() {
+            if pct(node.total, total) < min_pct {
+                continue;
+            }
             if pct(node.total, total) < expand_pct {
                 continue;
             }
@@ -129,6 +150,7 @@ fn print_tree(tree: &CallTree, libs: &[profile::Library], expand_pct: f64, max_d
                 &path,
                 total,
                 expand_pct,
+                min_pct,
                 max_depth,
                 depth + 1,
                 expanded,
@@ -140,15 +162,18 @@ fn print_tree(tree: &CallTree, libs: &[profile::Library], expand_pct: f64, max_d
         &[],
         tree.total_samples,
         expand_pct,
+        min_pct,
         max_depth,
         0,
         &mut expanded,
     );
-    for i in 0..tree.roots.len() {
-        expanded.insert(vec![i]);
+    for (i, root) in tree.roots.iter().enumerate() {
+        if pct(root.total, tree.total_samples) >= min_pct {
+            expanded.insert(vec![i]);
+        }
     }
 
-    let rows = tree.flatten(&expanded);
+    let rows = tree.flatten(&expanded, min_pct);
     for row in rows {
         if max_depth > 0 && row.depth >= max_depth {
             continue;

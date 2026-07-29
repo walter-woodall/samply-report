@@ -169,9 +169,55 @@ impl CallTree {
         })
     }
 
-    pub fn flatten(&self, expanded: &std::collections::HashSet<NodePath>) -> Vec<VisibleRow> {
+    pub fn flatten(
+        &self,
+        expanded: &std::collections::HashSet<NodePath>,
+        min_pct: f64,
+    ) -> Vec<VisibleRow> {
         let mut rows = Vec::new();
-        walk_forest(&self.roots, &[], 0, expanded, &mut rows);
+        walk_forest(
+            &self.roots,
+            &[],
+            0,
+            expanded,
+            self.total_samples,
+            min_pct,
+            &mut rows,
+        );
+        rows
+    }
+
+    pub fn get(&self, path: &[usize]) -> Option<&TreeNode> {
+        let (first, rest) = path.split_first()?;
+        let mut node = self.roots.get(*first)?;
+        for idx in rest {
+            node = node.children.get(*idx)?;
+        }
+        Some(node)
+    }
+
+    /// Flatten a single subtree re-rooted at visual depth 0.
+    /// The root itself is always shown (`force`), even if below `min_pct`.
+    pub fn flatten_rooted(
+        &self,
+        root: &NodePath,
+        expanded: &std::collections::HashSet<NodePath>,
+        min_pct: f64,
+    ) -> Vec<VisibleRow> {
+        let Some(node) = self.get(root) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        push_subtree(
+            node,
+            root.clone(),
+            0,
+            expanded,
+            self.total_samples,
+            min_pct,
+            true,
+            &mut rows,
+        );
         rows
     }
 
@@ -180,20 +226,65 @@ impl CallTree {
     /// Only topmost matches become roots (a match under another match is shown
     /// by expanding the ancestor, not as its own root). Children keep relative
     /// indentation from that root.
+    ///
+    /// When `within` is set, search only that subtree (absolute paths preserved).
     pub fn flatten_filtered<F>(
         &self,
         expanded: &std::collections::HashSet<NodePath>,
+        within: Option<&NodePath>,
+        min_pct: f64,
         mut is_match: F,
     ) -> Vec<VisibleRow>
     where
         F: FnMut(&FrameKey) -> bool,
     {
+        let total = self.total_samples;
         let mut match_roots: Vec<(NodePath, &TreeNode)> = Vec::new();
-        find_topmost_matches(&self.roots, &[], &mut is_match, false, &mut match_roots);
+        match within {
+            Some(root) => {
+                let Some(node) = self.get(root) else {
+                    return Vec::new();
+                };
+                if is_match(&node.frame) {
+                    match_roots.push((root.clone(), node));
+                } else {
+                    find_topmost_matches(
+                        &node.children,
+                        root,
+                        &mut is_match,
+                        false,
+                        total,
+                        min_pct,
+                        &mut match_roots,
+                    );
+                }
+            }
+            None => {
+                find_topmost_matches(
+                    &self.roots,
+                    &[],
+                    &mut is_match,
+                    false,
+                    total,
+                    min_pct,
+                    &mut match_roots,
+                );
+            }
+        }
 
         let mut rows = Vec::new();
         for (path, node) in match_roots {
-            push_subtree(node, path, 0, expanded, &mut rows);
+            // Matched / focused roots are always shown.
+            push_subtree(
+                node,
+                path,
+                0,
+                expanded,
+                total,
+                min_pct,
+                true,
+                &mut rows,
+            );
         }
         rows
     }
@@ -204,13 +295,34 @@ fn walk_forest(
     prefix: &[usize],
     depth: usize,
     expanded: &std::collections::HashSet<NodePath>,
+    total_samples: u64,
+    min_pct: f64,
     rows: &mut Vec<VisibleRow>,
 ) {
     for (i, node) in children.iter().enumerate() {
+        if pct(node.total, total_samples) < min_pct {
+            continue;
+        }
         let mut path = prefix.to_vec();
         path.push(i);
-        push_subtree(node, path, depth, expanded, rows);
+        push_subtree(
+            node,
+            path,
+            depth,
+            expanded,
+            total_samples,
+            min_pct,
+            false,
+            rows,
+        );
     }
+}
+
+fn visible_child_count(node: &TreeNode, total_samples: u64, min_pct: f64) -> usize {
+    node.children
+        .iter()
+        .filter(|c| pct(c.total, total_samples) >= min_pct)
+        .count()
 }
 
 fn push_subtree(
@@ -218,23 +330,42 @@ fn push_subtree(
     path: NodePath,
     depth: usize,
     expanded: &std::collections::HashSet<NodePath>,
+    total_samples: u64,
+    min_pct: f64,
+    force: bool,
     rows: &mut Vec<VisibleRow>,
 ) {
+    if !force && pct(node.total, total_samples) < min_pct {
+        return;
+    }
     let is_expanded = expanded.contains(&path);
+    let has_children = visible_child_count(node, total_samples, min_pct) > 0;
     rows.push(VisibleRow {
         path: path.clone(),
         depth,
         frame: node.frame.clone(),
         total: node.total,
         self_count: node.self_count,
-        has_children: !node.children.is_empty(),
+        has_children,
         expanded: is_expanded,
     });
-    if is_expanded && !node.children.is_empty() {
+    if is_expanded && has_children {
         for (i, child) in node.children.iter().enumerate() {
+            if pct(child.total, total_samples) < min_pct {
+                continue;
+            }
             let mut child_path = path.clone();
             child_path.push(i);
-            push_subtree(child, child_path, depth + 1, expanded, rows);
+            push_subtree(
+                child,
+                child_path,
+                depth + 1,
+                expanded,
+                total_samples,
+                min_pct,
+                false,
+                rows,
+            );
         }
     }
 }
@@ -244,11 +375,16 @@ fn find_topmost_matches<'a, F>(
     prefix: &[usize],
     is_match: &mut F,
     under_match: bool,
+    total_samples: u64,
+    min_pct: f64,
     out: &mut Vec<(NodePath, &'a TreeNode)>,
 ) where
     F: FnMut(&FrameKey) -> bool,
 {
     for (i, node) in children.iter().enumerate() {
+        if pct(node.total, total_samples) < min_pct {
+            continue;
+        }
         let mut path = prefix.to_vec();
         path.push(i);
         let matched = is_match(&node.frame);
@@ -260,6 +396,8 @@ fn find_topmost_matches<'a, F>(
             &path,
             is_match,
             under_match || matched,
+            total_samples,
+            min_pct,
             out,
         );
     }

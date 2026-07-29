@@ -27,6 +27,10 @@ pub struct App {
     pub status: String,
     /// Horizontal scroll offset (in chars) for the Symbol column.
     pub symbol_scroll: usize,
+    /// When set, the view is re-rooted on this node (Shift+F).
+    pub focus_root: Option<NodePath>,
+    /// Hide nodes whose total sample share is below this percent.
+    pub min_pct: f64,
 }
 
 impl App {
@@ -36,10 +40,11 @@ impl App {
         thread_index: usize,
         thread_name: String,
         tree: CallTree,
+        min_pct: f64,
     ) -> Self {
         let mut expanded = HashSet::new();
         for (i, root) in tree.roots.iter().enumerate() {
-            if pct(root.total, tree.total_samples) >= 5.0 {
+            if pct(root.total, tree.total_samples) >= f64::max(5.0, min_pct) {
                 expanded.insert(vec![i]);
             }
         }
@@ -55,18 +60,53 @@ impl App {
             filtering: false,
             status: String::new(),
             symbol_scroll: 0,
+            focus_root: None,
+            min_pct,
         }
     }
 
     fn visible_rows(&self) -> Vec<crate::tree::VisibleRow> {
+        let focus = self.focus_root.as_ref();
         if self.filter.is_empty() {
-            return self.tree.flatten(&self.expanded);
+            return match focus {
+                Some(root) => self.tree.flatten_rooted(root, &self.expanded, self.min_pct),
+                None => self.tree.flatten(&self.expanded, self.min_pct),
+            };
         }
         let filter = self.filter.to_lowercase();
         let libs = &self.libs;
-        self.tree.flatten_filtered(&self.expanded, |frame| {
-            format_frame(frame, libs).to_lowercase().contains(&filter)
-        })
+        self.tree
+            .flatten_filtered(&self.expanded, focus, self.min_pct, |frame| {
+                format_frame(frame, libs).to_lowercase().contains(&filter)
+            })
+    }
+
+    fn focus_current(&mut self) {
+        let rows = self.visible_rows();
+        let Some(row) = rows.get(self.cursor) else {
+            return;
+        };
+        let path = row.path.clone();
+        let name = format_frame(&row.frame, &self.libs);
+        self.focus_root = Some(path.clone());
+        // Show the focused node with its immediate children.
+        self.clear_descendants(&path);
+        if row.has_children {
+            self.expanded.insert(path);
+        }
+        self.cursor = 0;
+        self.symbol_scroll = 0;
+        self.status = format!("focused on {name}");
+    }
+
+    fn clear_focus(&mut self) {
+        if self.focus_root.is_none() {
+            return;
+        }
+        self.focus_root = None;
+        self.cursor = 0;
+        self.symbol_scroll = 0;
+        self.status = "cleared focus".into();
     }
 
     fn expand_node(&mut self) {
@@ -199,17 +239,29 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                 Constraint::Length(10),
                 Constraint::Min(8),
             ];
+            let tree_title = match (&app.focus_root, app.filter.is_empty()) {
+                (Some(path), true) => {
+                    let name = app
+                        .tree
+                        .get(path)
+                        .map(|n| format_frame(&n.frame, &app.libs))
+                        .unwrap_or_else(|| "?".into());
+                    format!("Call tree (focused: {name})")
+                }
+                (Some(path), false) => {
+                    let name = app
+                        .tree
+                        .get(path)
+                        .map(|n| format_frame(&n.frame, &app.libs))
+                        .unwrap_or_else(|| "?".into());
+                    format!("Call tree (focused: {name}, filter: {})", app.filter)
+                }
+                (None, false) => format!("Call tree (filter: {})", app.filter),
+                (None, true) => "Call tree".to_string(),
+            };
             let table = Table::new(table_rows, widths)
                 .header(header)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(if app.filter.is_empty() {
-                            "Call tree".to_string()
-                        } else {
-                            format!("Call tree (filter: {})", app.filter)
-                        }),
-                )
+                .block(Block::default().borders(Borders::ALL).title(tree_title))
                 .row_highlight_style(
                     Style::default()
                         .add_modifier(Modifier::REVERSED)
@@ -220,14 +272,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
 
             let status = if app.filtering {
                 format!("Filter: {}_  (Enter apply, Esc cancel)", app.filter)
-            } else if !app.filter.is_empty() {
-                format!(
-                    "{} | filter=\"{}\" (matches re-rooted at depth 0) | e/c  h/l scroll  /  q",
-                    app.status, app.filter
-                )
             } else {
                 format!(
-                    "{} | j/k move  e expand  c collapse  h/l scroll  / filter  q quit",
+                    "{} | j/k move  e/c expand/collapse  Shift+F focus  u unfocus  h/l scroll  / filter  q quit",
                     app.status
                 )
             };
@@ -267,7 +314,15 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Char('q') => break,
+            KeyCode::Esc => {
+                if app.focus_root.is_some() || !app.filter.is_empty() {
+                    app.filter.clear();
+                    app.clear_focus();
+                } else {
+                    break;
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 let len = app.visible_rows().len();
                 if len > 0 {
@@ -310,6 +365,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
             KeyCode::Char('e') => app.expand_node(),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Char('c') => app.collapse_node(),
+            KeyCode::Char('F') => app.focus_current(),
+            KeyCode::Char('u') => app.clear_focus(),
             KeyCode::Char('/') => {
                 app.filtering = true;
                 app.filter.clear();
