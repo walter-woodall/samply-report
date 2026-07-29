@@ -27,8 +27,11 @@ Accepts plain JSON or gzip-compressed profiles.
 | `j` / `k` / arrows | Move |
 | `e` | Expand current node (immediate children only) |
 | `c` | Collapse current node (or parent if already collapsed) |
+| `h` / `l` / ← / → | Scroll long symbol names horizontally |
 | `/` | Filter by symbol substring |
 | `q` / Esc | Quit |
+
+Symbols stay space-indented by depth; use horizontal scroll when a line is wider than the terminal. With an active filter, matching frames are re-rooted at depth 0 and their children indent relative to that match, so deep hits are easier to browse.
 
 ## How it works
 
